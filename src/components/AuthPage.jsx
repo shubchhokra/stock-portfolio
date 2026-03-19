@@ -45,7 +45,7 @@ export default function AuthPage() {
       <div style={{ textAlign: 'center', marginBottom: '40px' }}>
         <div style={{ fontSize: '52px', marginBottom: '10px' }}>📈</div>
         <h1 style={{ fontSize: '30px', fontWeight: '800', color: 'var(--text)', margin: 0, letterSpacing: '-0.5px' }}>
-          Stock Market Game
+          SC Stock Pick Game
         </h1>
         <p style={{ color: 'var(--muted)', marginTop: '10px', fontSize: '15px' }}>
           Trade real stocks with <strong style={{ color: 'var(--green)' }}>$1,000,000</strong> in virtual cash. Beat the leaderboard.

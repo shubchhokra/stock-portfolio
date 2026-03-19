@@ -72,7 +72,7 @@ export default function GameDashboard() {
       }}>
         <div style={{ maxWidth: '1280px', margin: '0 auto', display: 'flex', alignItems: 'center', height: '60px' }}>
           <span style={{ fontSize: '20px', fontWeight: '700', marginRight: '32px' }}>
-            📈 Stock Game
+            📈 SC Stock Pick Game
           </span>
 
           {/* Tabs */}
