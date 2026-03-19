@@ -2,27 +2,20 @@ import express from 'express';
 import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
 
-// ─── Supabase (service role – bypasses RLS) ───────────────────────────────────
-
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
-  { auth: { autoRefreshToken: false, persistSession: false } }
-);
-
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 const INITIAL_CASH = 1_000_000;
 const PORT = process.env.PORT || 3001;
 
-// ─── Auth middleware ──────────────────────────────────────────────────────────
+// Public client — for leaderboard reads and token verification
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-async function requireAuth(req, res, next) {
-  const header = req.headers.authorization;
-  if (!header?.startsWith('Bearer ')) return res.status(401).json({ error: 'Authentication required' });
-  const { data: { user }, error } = await supabase.auth.getUser(header.slice(7));
-  if (error || !user) return res.status(401).json({ error: 'Invalid or expired session' });
-  req.userId = user.id;
-  req.userEmail = user.email;
-  next();
+// Returns a client that acts as the authenticated user (respects RLS)
+function userClient(token) {
+  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    global: { headers: { Authorization: `Bearer ${token}` } },
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
 }
 
 // ─── Price cache ──────────────────────────────────────────────────────────────
@@ -56,6 +49,19 @@ async function getPrice(symbol) {
   return quote;
 }
 
+// ─── Auth middleware ──────────────────────────────────────────────────────────
+
+async function requireAuth(req, res, next) {
+  const header = req.headers.authorization;
+  if (!header?.startsWith('Bearer ')) return res.status(401).json({ error: 'Authentication required' });
+  const token = header.slice(7);
+  const { data: { user }, error } = await supabase.auth.getUser(token);
+  if (error || !user) return res.status(401).json({ error: 'Invalid or expired session' });
+  req.userId = user.id;
+  req.token = token;
+  next();
+}
+
 // ─── Express setup ────────────────────────────────────────────────────────────
 
 const app = express();
@@ -64,56 +70,21 @@ app.use(express.json());
 
 app.get('/api/health', (_, res) => res.json({ ok: true }));
 
-// ─── Auth: Signup ─────────────────────────────────────────────────────────────
-// Creates the Supabase auth user (with email_confirm bypassed) and the profile row.
+// ─── Check username availability (called before frontend signup) ──────────────
 
-app.post('/api/auth/signup', async (req, res) => {
-  const { email, username, password } = req.body || {};
-  if (!email || !username?.trim() || !password)
-    return res.status(400).json({ error: 'Email, username, and password are required' });
-  if (username.trim().length < 3)
-    return res.status(400).json({ error: 'Username must be at least 3 characters' });
-  if (password.length < 6)
-    return res.status(400).json({ error: 'Password must be at least 6 characters' });
-
-  const cleanUsername = username.trim();
-
-  // Check username availability
-  const { data: existing } = await supabase
-    .from('profiles').select('id').eq('username', cleanUsername).maybeSingle();
-  if (existing) return res.status(409).json({ error: 'Username already taken' });
-
-  // Create auth user (service role auto-confirms email)
-  const { data: { user }, error: authErr } = await supabase.auth.admin.createUser({
-    email,
-    password,
-    email_confirm: true,
-    user_metadata: { username: cleanUsername },
-  });
-  if (authErr) {
-    if (authErr.message.includes('already registered'))
-      return res.status(409).json({ error: 'Email already registered' });
-    return res.status(500).json({ error: authErr.message, code: authErr.code });
-  }
-
-  // Create profile
-  const { error: profileErr } = await supabase
-    .from('profiles')
-    .insert({ id: user.id, username: cleanUsername, cash: INITIAL_CASH });
-  if (profileErr) {
-    await supabase.auth.admin.deleteUser(user.id);
-    return res.status(500).json({ error: 'Failed to create profile', detail: profileErr.message });
-  }
-
-  res.json({ success: true });
+app.get('/api/auth/check-username/:username', async (req, res) => {
+  const { data } = await supabase
+    .from('profiles').select('id').eq('username', req.params.username.trim()).maybeSingle();
+  res.json({ available: !data });
 });
 
 // ─── Portfolio ────────────────────────────────────────────────────────────────
 
 app.get('/api/portfolio', requireAuth, async (req, res) => {
+  const db = userClient(req.token);
   const [{ data: profile }, { data: holdings }] = await Promise.all([
-    supabase.from('profiles').select('id, username, cash').eq('id', req.userId).single(),
-    supabase.from('holdings').select('symbol, shares, avg_cost').eq('user_id', req.userId).gt('shares', 0),
+    db.from('profiles').select('id, username, cash').eq('id', req.userId).single(),
+    db.from('holdings').select('symbol, shares, avg_cost').eq('user_id', req.userId).gt('shares', 0),
   ]);
   if (!profile) return res.status(404).json({ error: 'Profile not found' });
   res.json({ ...profile, holdings: holdings || [] });
@@ -130,30 +101,28 @@ app.post('/api/trade/buy', requireAuth, async (req, res) => {
   try {
     const quote = await getPrice(symbol.toUpperCase());
     const total = parseFloat((quote.price * numShares).toFixed(4));
+    const db = userClient(req.token);
 
-    const { data: profile } = await supabase.from('profiles').select('cash').eq('id', req.userId).single();
+    const { data: profile } = await db.from('profiles').select('cash').eq('id', req.userId).single();
     if (!profile || profile.cash < total)
       return res.status(400).json({ error: `Insufficient funds — need ${fmt(total)}, have ${fmt(profile?.cash ?? 0)}` });
 
-    const { data: existing } = await supabase
+    const { data: existing } = await db
       .from('holdings').select('shares, avg_cost').eq('user_id', req.userId).eq('symbol', quote.symbol).maybeSingle();
 
-    // Update cash
-    await supabase.from('profiles').update({ cash: parseFloat((profile.cash - total).toFixed(2)) }).eq('id', req.userId);
+    await db.from('profiles').update({ cash: parseFloat((profile.cash - total).toFixed(2)) }).eq('id', req.userId);
 
-    // Upsert holding
     if (existing) {
       const newShares = parseFloat((existing.shares + numShares).toFixed(8));
       const newAvg = parseFloat(((existing.shares * existing.avg_cost + numShares * quote.price) / newShares).toFixed(4));
-      await supabase.from('holdings').update({ shares: newShares, avg_cost: newAvg }).eq('user_id', req.userId).eq('symbol', quote.symbol);
+      await db.from('holdings').update({ shares: newShares, avg_cost: newAvg }).eq('user_id', req.userId).eq('symbol', quote.symbol);
     } else {
-      await supabase.from('holdings').insert({ user_id: req.userId, symbol: quote.symbol, shares: numShares, avg_cost: quote.price });
+      await db.from('holdings').insert({ user_id: req.userId, symbol: quote.symbol, shares: numShares, avg_cost: quote.price });
     }
 
-    // Log transaction
-    await supabase.from('transactions').insert({ user_id: req.userId, symbol: quote.symbol, type: 'buy', shares: numShares, price: quote.price, total });
+    await db.from('transactions').insert({ user_id: req.userId, symbol: quote.symbol, type: 'buy', shares: numShares, price: quote.price, total });
 
-    const { data: updated } = await supabase.from('profiles').select('cash').eq('id', req.userId).single();
+    const { data: updated } = await db.from('profiles').select('cash').eq('id', req.userId).single();
     res.json({ success: true, symbol: quote.symbol, price: quote.price, shares: numShares, total, cash: updated.cash });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -169,7 +138,8 @@ app.post('/api/trade/sell', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'Valid symbol and share count required' });
 
   const sym = symbol.toUpperCase();
-  const { data: holding } = await supabase.from('holdings').select('shares').eq('user_id', req.userId).eq('symbol', sym).maybeSingle();
+  const db = userClient(req.token);
+  const { data: holding } = await db.from('holdings').select('shares').eq('user_id', req.userId).eq('symbol', sym).maybeSingle();
   if (!holding || holding.shares < numShares - 0.0001)
     return res.status(400).json({ error: `You only own ${holding?.shares?.toFixed(4) || 0} shares of ${sym}` });
 
@@ -177,19 +147,19 @@ app.post('/api/trade/sell', requireAuth, async (req, res) => {
     const quote = await getPrice(sym);
     const total = parseFloat((quote.price * numShares).toFixed(4));
 
-    const { data: profile } = await supabase.from('profiles').select('cash').eq('id', req.userId).single();
-    await supabase.from('profiles').update({ cash: parseFloat((profile.cash + total).toFixed(2)) }).eq('id', req.userId);
+    const { data: profile } = await db.from('profiles').select('cash').eq('id', req.userId).single();
+    await db.from('profiles').update({ cash: parseFloat((profile.cash + total).toFixed(2)) }).eq('id', req.userId);
 
     const remaining = parseFloat((holding.shares - numShares).toFixed(8));
     if (remaining < 0.0001) {
-      await supabase.from('holdings').delete().eq('user_id', req.userId).eq('symbol', sym);
+      await db.from('holdings').delete().eq('user_id', req.userId).eq('symbol', sym);
     } else {
-      await supabase.from('holdings').update({ shares: remaining }).eq('user_id', req.userId).eq('symbol', sym);
+      await db.from('holdings').update({ shares: remaining }).eq('user_id', req.userId).eq('symbol', sym);
     }
 
-    await supabase.from('transactions').insert({ user_id: req.userId, symbol: sym, type: 'sell', shares: numShares, price: quote.price, total });
+    await db.from('transactions').insert({ user_id: req.userId, symbol: sym, type: 'sell', shares: numShares, price: quote.price, total });
 
-    const { data: updated } = await supabase.from('profiles').select('cash').eq('id', req.userId).single();
+    const { data: updated } = await db.from('profiles').select('cash').eq('id', req.userId).single();
     res.json({ success: true, symbol: sym, price: quote.price, shares: numShares, total, cash: updated.cash });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -235,12 +205,10 @@ app.get('/api/leaderboard', async (req, res) => {
 // ─── Transactions ─────────────────────────────────────────────────────────────
 
 app.get('/api/transactions', requireAuth, async (req, res) => {
-  const { data } = await supabase
-    .from('transactions')
-    .select('*')
-    .eq('user_id', req.userId)
-    .order('created_at', { ascending: false })
-    .limit(100);
+  const db = userClient(req.token);
+  const { data } = await db
+    .from('transactions').select('*').eq('user_id', req.userId)
+    .order('created_at', { ascending: false }).limit(100);
   res.json(data || []);
 });
 
@@ -279,8 +247,6 @@ app.get('/api/historical/:symbol', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function fmt(n) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
