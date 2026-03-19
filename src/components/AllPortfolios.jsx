@@ -11,6 +11,7 @@ export default function AllPortfolios({ currentUser }) {
   const [prices, setPrices] = useState({});
   const [loadingList, setLoadingList] = useState(true);
   const [loadingPortfolio, setLoadingPortfolio] = useState(false);
+  const [portfolioError, setPortfolioError] = useState(null);
 
   // Load ranked player list from leaderboard
   useEffect(() => {
@@ -25,6 +26,7 @@ export default function AllPortfolios({ currentUser }) {
     if (!selected) return;
     setPortfolio(null);
     setPrices({});
+    setPortfolioError(null);
     setLoadingPortfolio(true);
     apiFetch(`/portfolio/${selected}`)
       .then(async data => {
@@ -40,7 +42,7 @@ export default function AllPortfolios({ currentUser }) {
           setPrices(p);
         }
       })
-      .catch(console.error)
+      .catch(err => { console.error(err); setPortfolioError(err.message); })
       .finally(() => setLoadingPortfolio(false));
   }, [selected]);
 
@@ -103,6 +105,12 @@ export default function AllPortfolios({ currentUser }) {
         {selected && loadingPortfolio && (
           <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '12px', padding: '64px', textAlign: 'center', color: 'var(--muted)' }}>
             Loading…
+          </div>
+        )}
+
+        {selected && !loadingPortfolio && portfolioError && (
+          <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '12px', padding: '40px', textAlign: 'center', color: 'var(--red)' }}>
+            Error: {portfolioError}
           </div>
         )}
 
