@@ -93,7 +93,7 @@ app.post('/api/auth/signup', async (req, res) => {
   if (authErr) {
     if (authErr.message.includes('already registered'))
       return res.status(409).json({ error: 'Email already registered' });
-    return res.status(500).json({ error: authErr.message });
+    return res.status(500).json({ error: authErr.message, code: authErr.code });
   }
 
   // Create profile
@@ -102,7 +102,7 @@ app.post('/api/auth/signup', async (req, res) => {
     .insert({ id: user.id, username: cleanUsername, cash: INITIAL_CASH });
   if (profileErr) {
     await supabase.auth.admin.deleteUser(user.id);
-    return res.status(500).json({ error: 'Failed to create profile' });
+    return res.status(500).json({ error: 'Failed to create profile', detail: profileErr.message });
   }
 
   res.json({ success: true });
