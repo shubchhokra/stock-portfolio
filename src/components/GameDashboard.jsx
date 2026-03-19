@@ -6,8 +6,9 @@ import HoldingsTable from './HoldingsTable.jsx';
 import Leaderboard from './Leaderboard.jsx';
 import TransactionHistory from './TransactionHistory.jsx';
 import AllocationChart from './AllocationChart.jsx';
+import AllPortfolios from './AllPortfolios.jsx';
 
-const TABS = ['Portfolio', 'Trade', 'Leaderboard', 'History'];
+const TABS = ['Portfolio', 'Trade', 'Leaderboard', 'Portfolios', 'History'];
 
 export default function GameDashboard() {
   const { username, logout } = useAuth();
@@ -162,7 +163,11 @@ export default function GameDashboard() {
         )}
 
         {tab === 'Leaderboard' && (
-          <Leaderboard currentUser={username} />
+          <Leaderboard currentUser={username} onViewPortfolio={u => setTab('Portfolios')} />
+        )}
+
+        {tab === 'Portfolios' && (
+          <AllPortfolios currentUser={username} />
         )}
 
         {!loadingPortfolio && tab === 'History' && (

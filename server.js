@@ -78,7 +78,20 @@ app.get('/api/auth/check-username/:username', async (req, res) => {
   res.json({ available: !data });
 });
 
-// ─── Portfolio ────────────────────────────────────────────────────────────────
+// ─── Public portfolio by username ─────────────────────────────────────────────
+
+app.get('/api/portfolio/:username', async (req, res) => {
+  const { data: profile } = await supabase
+    .from('profiles').select('id, username, cash').eq('username', req.params.username).maybeSingle();
+  if (!profile) return res.status(404).json({ error: 'Player not found' });
+
+  const { data: holdings } = await supabase
+    .from('holdings').select('symbol, shares, avg_cost').eq('user_id', profile.id).gt('shares', 0);
+
+  res.json({ ...profile, holdings: holdings || [] });
+});
+
+// ─── Portfolio (own) ──────────────────────────────────────────────────────────
 
 app.get('/api/portfolio', requireAuth, async (req, res) => {
   const db = userClient(req.token);
